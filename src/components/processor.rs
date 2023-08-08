@@ -54,7 +54,7 @@ impl<T: super::drawer::Drawer + Default> Default for Processor<T> {
 }
 
 //supports up to 8 bytes
-pub fn concat_bytes<'a, Input, Output>(bytes: &'a [Input], amt: usize) -> Result<Output, &str> 
+pub fn concat_bytes<'a, Input, Output>(bytes: &'a [Input], shamt: usize) -> Result<Output, &str> 
 where   Input: Default 
             + Clone 
             + Into<Output>
@@ -70,10 +70,10 @@ where   Input: Default
                 return Err("cannot convert more than 8 bytes");
             }
 
-            return Ok(bytes.iter().fold(Output::default(), |acc, next| ((acc << amt) | next.clone().into())));
+            return Ok(bytes.iter().fold(Output::default(), |acc, next| ((acc << shamt) | next.clone().into())));
         }
 
-pub fn try_concat_bytes<'a, Input, Output>(bytes: &'a [Input], amt: usize) -> Result<Output, &str> 
+pub fn try_concat_bytes<'a, Input, Output>(bytes: &'a [Input], shamt: usize) -> Result<Output, &str> 
 where   Input: Default 
         + Clone 
         + TryInto<Output>
@@ -89,7 +89,7 @@ where   Input: Default
             return Err("cannot convert more than 8 bytes");
         }
 
-        return Ok(bytes.iter().fold(Output::default(), |acc, next| ((acc << amt) | next.clone().try_into().unwrap_or_else(|_|panic!("panic on try concat bytes"))).clone()));
+        return Ok(bytes.iter().fold(Output::default(), |acc, next| ((acc << shamt) | next.clone().try_into().unwrap_or_else(|_|panic!("panic on try concat bytes"))).clone()));
     }
 
 impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
