@@ -16,7 +16,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     read_rom_to_memory(std::path::Path::new(&arg_rom), &mut ram);
 
-    let mut processor = components::Processor::<components::drawer::GenericDrawer>::new(ram);
+    let drawer = components::drawer::GenericDrawer::new((0..32).map(|row| (0..64).map(|col| false).collect()).collect());
+
+    let mut processor = components::Processor::<components::drawer::GenericDrawer>::new(ram, drawer);
 
     loop {
         processor.step()?;
