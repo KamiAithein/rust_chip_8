@@ -1,5 +1,8 @@
 use std::default;
 use super::drawer;
+use super::Instruction;
+
+const SPRITE_SIZE_BYTES: usize = 5;
 
 #[derive(Debug)]
 pub struct Processor<T: super::drawer::Drawer> {
@@ -15,7 +18,7 @@ pub struct Processor<T: super::drawer::Drawer> {
 }
 
 
-type Instruction = u16;
+
 
 #[derive(Debug)]
 enum ProcessorError {
@@ -94,9 +97,10 @@ where   Input: Default
 
 impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
 
-    pub fn new(ram: [u8; 4096]) -> Processor<T> {
+    pub fn new(ram: [u8; 4096], drawer: T) -> Processor<T> {
         Processor {
             ram,
+            drawer,
             ..Default::default()
         }
     }
@@ -179,7 +183,7 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             [0x7, x, kk@..] => {
                 //Set Vx = Vx + kk.
                 let kk = try_concat_bytes::<u16, u8>(&kk, 4)?;
-                self.v_register[x as usize] +=  kk;
+                self.v_register[x as usize] = self.v_register[x as usize].wrapping_add(kk);
                 self.pc += 2;
                 Ok(())
             },
@@ -212,17 +216,24 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
                 let x = self.v_register[x as usize];
                 let y = self.v_register[y as usize];
 
-                let carry = x.checked_add(y);
-                match carry {
-                    Some(new_val) => {
-                        self.v_register[x as usize] = new_val;
-                        self.v_register[0xF] = 0;
-                    },
-                    None => {
-                        self.v_register[x as usize] = u8::MAX;
-                        self.v_register[0xF] = 1;
-                    }
-                };
+                let (new_value, carry) = x.overflowing_add(y);
+                if carry {
+                    self.v_register[0xF] = 1;
+                } else {
+                    self.v_register[0xF] = 0;
+                }
+
+                self.v_register[x as usize] = new_value;
+                // match carry {
+                //     Some(new_val) => {
+                //         self.v_register[x as usize] = new_val;
+                //         self.v_register[0xF] = 0;
+                //     },
+                //     None => {
+                //         self.v_register[x as usize] = u8::MAX;
+                //         self.v_register[0xF] = 1;
+                //     }
+                // };
                 self.pc += 2;
                 Ok(())
             },
@@ -307,7 +318,28 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             },
             [0xD, x, y, n] => {
                 //Display n-byte sprite starting at memory location I at (Vx, Vy), set VF = collision.
-                todo!("how thefuc");
+                let sprite = &self.ram[self.i_register as usize..(self.i_register + n) as usize];
+
+                let width = self.drawer.width();
+                let height = self.drawer.height();
+
+                let x_0 = self.v_register[x as usize] as usize;
+                let y_0 = self.v_register[y as usize] as usize;
+                for i_byte in 0_usize..(n as usize) {
+                    for i_bit in 0_usize..8_usize {
+                        let is_draw = (sprite[i_byte] >> i_bit) & 0x01_u8 > 0;
+                        let collision = if is_draw {
+                            self.drawer.draw_pixel_at_with_logs((x_0 + (7-i_bit)) % width, y_0 + i_byte % height, &self.log)
+                        } else {
+                            false
+                        };
+
+                        if collision {
+                            self.v_register[0xF as usize] = 0x1;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
 
                 self.pc += 2;
                 Ok(())
@@ -397,6 +429,8 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::process;
+
     use super::*;
     #[test]
     fn test_return_abc() {
@@ -428,6 +462,84 @@ mod tests {
         assert_eq!(0x0DEF, processor.pc); // the pc is now at nnn
         assert_eq!(1, processor.sp); // the sp is now at 1
         assert_eq!(0x0ABC, processor.stack[processor.sp as usize]); // the old pc is at top of stack
+    }
+
+    #[test]
+    fn test_skip_if_next_instruction_eq() {
+        let mut processor = Processor::<drawer::GenericDrawer>::default();
+
+        let pre_pc = processor.pc;
+        processor.v_register[0x0] = 0xAB;
+
+        processor.consume_instruction(0x30AB).expect("");
+        assert_eq!(pre_pc + 4, processor.pc);
+
+    }
+    #[test]
+    fn test_skip_if_next_instruction_neq() {
+        let mut processor = Processor::<drawer::GenericDrawer>::default();
+
+        let pre_pc = processor.pc;
+        processor.v_register[0x0] = 0xCD;
+
+        processor.consume_instruction(0x30AB).expect("");
+        assert_eq!(pre_pc + 2, processor.pc);
+    }
+
+    #[test]
+    fn test_skip_if_not_next_instruction_eq() {
+        let mut processor = Processor::<drawer::GenericDrawer>::default();
+
+        let pre_pc = processor.pc;
+        processor.v_register[0x0] = 0xCD;
+
+        processor.consume_instruction(0x40AB).expect("");
+        assert_eq!(pre_pc + 4, processor.pc);
+
+    }
+
+    #[test]
+    fn test_skip_if_not_next_instruction_neq() {
+        let mut processor = Processor::<drawer::GenericDrawer>::default();
+
+        let pre_pc = processor.pc;
+        processor.v_register[0x0] = 0xAB;
+
+        processor.consume_instruction(0x40AB).expect("");
+        assert_eq!(pre_pc + 2, processor.pc);
+    }
+
+    #[test]
+    fn test_skip_if_next_instruction_eq_reg() {
+        let mut processor = Processor::<drawer::GenericDrawer>::default();
+
+        let pre_pc = processor.pc;
+        processor.v_register[0x0] = 0xAB;
+        processor.v_register[0x1] = 0xAB;
+
+        processor.consume_instruction(0x5010).expect("");
+        assert_eq!(pre_pc + 4, processor.pc); 
+    }
+
+    #[test]
+    fn test_skip_if_next_instruction_neq_reg() {
+        let mut processor = Processor::<drawer::GenericDrawer>::default();
+
+        let pre_pc = processor.pc;
+        processor.v_register[0x0] = 0xAB;
+        processor.v_register[0x1] = 0xBC;
+
+        processor.consume_instruction(0x5010).expect("");
+        assert_eq!(pre_pc + 2, processor.pc); 
+    }
+
+    #[test]
+    fn test_load_byte_into_register() {
+        let mut processor = Processor::<drawer::GenericDrawer>::default();
+
+        processor.consume_instruction(0x60AB).expect("");
+        
+        assert_eq!(processor.v_register[0], 0xAB);
     }
 
     #[test]
