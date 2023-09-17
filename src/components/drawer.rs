@@ -34,6 +34,7 @@ pub trait Drawer {
     fn draw_pixel_at(&mut self, x: usize, y: usize) -> bool;
     fn width(&self) -> usize;
     fn height(&self) -> usize;
+    fn clear(&mut self);
 }
 
 
@@ -43,7 +44,7 @@ impl Drawer for GenericDrawer {
         let collision = self.buffer[y][x];
 
         self.buffer[y][x] ^= true;
-        println!("{}", "\x1B[2J");
+        // println!("{}", "\x1B[2J");
         println!("{}", &self);
 
         return collision;
@@ -55,5 +56,13 @@ impl Drawer for GenericDrawer {
 
     fn height(&self) -> usize {
         self.buffer.len()
+    }
+
+    fn clear(&mut self) {
+        for i_row in &mut self.buffer {
+            for i_col in i_row {
+                *i_col = false;    
+            }
+        }
     }
 }

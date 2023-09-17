@@ -1,8 +1,110 @@
 use std::default;
 use super::drawer;
 use super::Instruction;
+use super::timer::SharedTimer;
 
 const SPRITE_SIZE_BYTES: usize = 5;
+const STATIC_MEMORY: [u8 ; 80] = [
+    0xF0,
+    0x90,
+    0x90,
+    0x90,
+    0xF0,
+
+    0x20,
+    0x60,
+    0x20,
+    0x20,
+    0x70,
+
+    0xF0,
+    0x10,
+    0xF0,
+    0x80,
+    0xF0,
+
+    0xF0,
+    0x10,
+    0xF0,
+    0x10,
+    0xF0,
+
+    0x90,
+    0x90,
+    0xF0,
+    0x10,
+    0x10,
+
+    0xF0,
+    0x80,
+    0xF0,
+    0x10,
+    0xF0,
+
+    0xF0,
+    0x80,
+    0xF0,
+    0x90,
+    0xF0,
+
+    0xF0,
+    0x10,
+    0x20,
+    0x40,
+    0x40,
+
+    0xF0,
+    0x90,
+    0xF0,
+    0x90,
+    0xF0,
+
+    0xF0,
+    0x90,
+    0xF0,
+    0x10,
+    0xF0,
+
+    0xF0,
+    0x90,
+    0xF0,
+    0x90,
+    0x90,
+
+    0xE0,
+    0x90,
+    0xE0,
+    0x90,
+    0xE0,
+
+    0xF0,
+    0x80,
+    0x80,
+    0x80,
+    0xF0,
+
+    0xE0,
+    0x90,
+    0x90,
+    0x90,
+    0xE0,
+
+    0xF0,
+    0x80,
+    0xF0,
+    0x80,
+    0xF0,
+
+    0xF0,
+    0x80,
+    0xF0,
+    0x80,
+    0x80,
+];
+
+pub fn u16_to_sprite_loc(u16: u16) -> usize {
+    (u16 * 5) as usize
+}
 
 #[derive(Debug)]
 pub struct Processor<T: super::drawer::Drawer> {
@@ -14,7 +116,9 @@ pub struct Processor<T: super::drawer::Drawer> {
     pc: u16,
     sp: u8,
     log: Vec<Instruction>,
-    drawer: T
+    drawer: T,
+    timer: SharedTimer,
+    sound_timer: SharedTimer
 }
 
 
@@ -43,7 +147,7 @@ impl std::error::Error for ProcessorError {
 
 impl<T: super::drawer::Drawer + Default> Default for Processor<T> {
     fn default() -> Self {
-        Self { 
+        let mut default = Self { 
             ram: [0; 4096], 
             stack: Default::default(), 
             v_register: Default::default(), 
@@ -51,8 +155,14 @@ impl<T: super::drawer::Drawer + Default> Default for Processor<T> {
             pc: 0x200, 
             sp: Default::default(),
             log: Default::default(),
-            drawer: Default::default()
-        }
+            drawer: Default::default(),
+            timer: SharedTimer::new(0),
+            sound_timer: SharedTimer::new(0)
+        };
+
+        default.flash_memory();
+
+        default
     }
 }
 
@@ -95,14 +205,43 @@ where   Input: Default
         return Ok(bytes.iter().fold(Output::default(), |acc, next| ((acc << shamt) | next.clone().try_into().unwrap_or_else(|_|panic!("panic on try concat bytes"))).clone()));
     }
 
+fn nth_digit(from: usize, n: usize) -> usize {
+    let f_from = from as f32;
+    let n_digits = (f_from.log10() + 1_f32).floor() as usize;
+
+    if from == 0 {
+        return 0;
+    }
+
+    if n >= n_digits {
+        return 0;
+    }
+
+    println!("from: {from}, n: {n}, n_digits: {n_digits}");
+
+    (from / 10_usize.pow((n_digits - n - 1) as u32)) % 10
+}
+
+impl <T: super::drawer::Drawer> Processor<T> {
+    fn flash_memory(&mut self) {
+        for (read, write) in STATIC_MEMORY.iter().zip(self.ram.iter_mut()) {
+            *write = *read;
+        }
+    }
+}
+
 impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
 
     pub fn new(ram: [u8; 4096], drawer: T) -> Processor<T> {
-        Processor {
+        let mut processor = Processor {
             ram,
             drawer,
             ..Default::default()
-        }
+        };
+
+        processor.flash_memory();
+
+        processor
     }
 
     pub fn step(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -127,12 +266,15 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
         match [hi0, hi1, lo0, lo1] {
             [0x0, 0x0, 0xE, 0x0] => {
                 //clear
+                self.drawer.clear();
                 self.pc += 2;
                 Ok(())
             },
             [0x0, 0x0, 0xE, 0xE] => {
                 self.pc = self.stack[self.sp as usize];
                 self.sp -= 1;
+
+                self.pc += 2;
                 Ok(())
             },
             [0x1, nnn@..] => {
@@ -213,77 +355,68 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             },
             [0x8, x, y, 0x4] => {
                 //Set Vx = Vx + Vy, set VF = carry.
-                let x = self.v_register[x as usize];
-                let y = self.v_register[y as usize];
+                let x_val = self.v_register[x as usize];
+                let y_val = self.v_register[y as usize];
 
-                let (new_value, carry) = x.overflowing_add(y);
+                let (new_value, carry) = x_val.overflowing_add(y_val);
+
+
+                self.v_register[x as usize] = new_value;
+
+
                 if carry {
                     self.v_register[0xF] = 1;
                 } else {
                     self.v_register[0xF] = 0;
                 }
 
-                self.v_register[x as usize] = new_value;
-                // match carry {
-                //     Some(new_val) => {
-                //         self.v_register[x as usize] = new_val;
-                //         self.v_register[0xF] = 0;
-                //     },
-                //     None => {
-                //         self.v_register[x as usize] = u8::MAX;
-                //         self.v_register[0xF] = 1;
-                //     }
-                // };
                 self.pc += 2;
                 Ok(())
             },
             [0x8, x, y, 0x5] => {
                 //Set Vx = Vx - Vy, set VF = NOT borrow.
-                self.v_register[0xF] = if self.v_register[x as usize] > self.v_register[y as usize] {
-                     1
+                let vf = if self.v_register[x as usize] > self.v_register[y as usize] {
+                    1
                 } else {
                     0
                 };
 
-                self.v_register[x as usize] -= self.v_register[y as usize];
+                self.v_register[x as usize] = self.v_register[x as usize].wrapping_sub(self.v_register[y as usize]);
+                self.v_register[0xF] = vf;
+
                 self.pc += 2;
                 Ok(())
             },
             [0x8, x, _, 0x6] => {
                 //Set Vx = Vx SHR 1.
-                let lsd = self.v_register[x as usize] & 0x01;
-                self.v_register[0xF] = if lsd > 0 {
-                    1
-                } else {
-                    0
-                };
+                let vf = self.v_register[x as usize] & 0x01;
 
                 self.v_register[x as usize] >>= 1;
+                self.v_register[0xF] = vf;
                 self.pc += 2;
                 Ok(())
             },
             [0x8, x, y, 0x7] => {
                 //Set Vx = Vy - Vx, set VF = NOT borrow.
-                self.v_register[0xF] = if self.v_register[y as usize] > self.v_register[x as usize] {
+                let vf = if self.v_register[y as usize] > self.v_register[x as usize] {
                     1
                 } else { 
                     0 
                 };
 
-                self.v_register[x as usize] = self.v_register[y as usize] - self.v_register[x as usize];
+                self.v_register[x as usize] = self.v_register[y as usize].wrapping_sub(self.v_register[x as usize]);
+                self.v_register[0xF] = vf;
+
                 self.pc += 2;
                 Ok(())
             },
-            [0x8, x, _, 0xE] => {
+            [0x8, x, y, 0xE] => {
                 //Set Vx = Vx SHL 1.
-                let msd = 0xA0 & self.v_register[x as usize];
-                self.v_register[0xF] = if msd > 0 {
-                    1
-                } else {
-                    0
-                };
-
+                let vf =  0x80 & self.v_register[x as usize];
+                
                 self.v_register[x as usize] <<= 1;
+                self.v_register[0xF] = vf;
+
                 self.pc += 2;
                 Ok(())
             },
@@ -348,7 +481,7 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
                 //Skip next instruction if key with the value of Vx is pressed.
 
                 self.pc += 2;
-                Ok(())
+                todo!("not implemented")
             },
             [0xE, x, 0xA, 0x1] => {
                 //Skip next instruction if key with the value of Vx is not pressed.
@@ -359,6 +492,8 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             [0xF, x, 0x0, 0x7] => {
                 //Set Vx = delay timer value.
 
+                self.v_register[x as usize] = self.timer.get();
+
                 self.pc += 2;
                 Ok(())
             },
@@ -366,16 +501,19 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
                 //Wait for a key press, store the value of the key in Vx.
 
                 //?
-                Ok(())
+                todo!("not implemented")
             },
             [0xF, x, 0x1, 0x5] => {
                 //Set delay timer = Vx.
+
+                self.timer.set(self.v_register[x as usize]);
 
                 self.pc += 2;
                 Ok(())
             },
             [0xF, x, 0x1, 0x8] => {
                 //Set sound timer = Vx.
+                self.sound_timer.set(self.v_register[x as usize]);
 
                 self.pc += 2;
                 Ok(())
@@ -389,19 +527,25 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             },
             [0xF, x, 0x2, 0x9] => {
                 //Set I = location of sprite for digit Vx.
-
+                
+                self.i_register = u16_to_sprite_loc(x) as u16;
                 self.pc += 2;
                 Ok(())
             },
             [0xF, x, 0x3, 0x3] => {
                 //Store BCD representation of Vx in memory locations I, I+1, and I+2.
+                let vx =  self.v_register[x as usize];
+                for i in 0..3 {
+                    self.ram[(self.i_register + i) as usize] = nth_digit(vx.into(), i.into()).try_into().expect("err BCD");
+                }
+                
 
                 self.pc += 2;
                 Ok(())
             },
             [0xF, x, 0x5, 0x5] => {
                 //Store registers V0 through Vx in memory starting at location I.
-                for i in 0..x {
+                for i in 0..=x {
                     self.ram[(self.i_register + i as u16) as usize] = self.v_register[i as usize];
                 }
 
@@ -410,7 +554,7 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             },
             [0xF, x, 0x6, 0x5] => {
                 //Read registers V0 through Vx from memory starting at location I.
-                for i in 0..x {
+                for i in 0..=x {
                     self.v_register[i as usize] = self.ram[(self.i_register + i as u16) as usize];
                 }
 
@@ -429,9 +573,15 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::process;
-
     use super::*;
+
+    #[test]
+    fn test_nth_digit() {
+        assert_eq!(1, nth_digit(123, 0));
+        assert_eq!(2, nth_digit(123, 1));
+        assert_eq!(3, nth_digit(123, 2));
+    }
+
     #[test]
     fn test_return_abc() {
         let mut processor = Processor::<drawer::GenericDrawer>::default();

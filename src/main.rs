@@ -1,3 +1,5 @@
+use components::Ram;
+
 mod components;
 
 pub fn read_rom_to_memory(rom: &std::path::Path, ram: &mut components::Ram) {
