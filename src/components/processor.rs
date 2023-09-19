@@ -412,7 +412,7 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             },
             [0x8, x, y, 0xE] => {
                 //Set Vx = Vx SHL 1.
-                let vf =  0x80 & self.v_register[x as usize];
+                let vf =  (self.v_register[x as usize] & 0x80 > 0) as u8;
                 
                 self.v_register[x as usize] <<= 1;
                 self.v_register[0xF] = vf;
@@ -472,7 +472,7 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
                         }
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+                std::thread::sleep(std::time::Duration::from_millis(5));
 
                 self.pc += 2;
                 Ok(())
@@ -487,7 +487,7 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
                 //Skip next instruction if key with the value of Vx is not pressed.
 
                 self.pc += 2;
-                Ok(())
+                todo!("not implemented")
             },
             [0xF, x, 0x0, 0x7] => {
                 //Set Vx = delay timer value.
@@ -589,7 +589,7 @@ mod tests {
         processor.consume_instruction(0x2ABC).expect(""); // call function at ABC
         processor.consume_instruction(0x00EE).expect(""); // return to 0x0000 
 
-        assert_eq!(0x200, processor.pc); // is at 0x0000
+        assert_eq!(0x202, processor.pc); // is at 0x0000
         assert_eq!(0, processor.sp); // stack pointer back to beginning 
     }
 
@@ -689,7 +689,7 @@ mod tests {
 
         processor.consume_instruction(0x60AB).expect("");
         
-        assert_eq!(processor.v_register[0], 0xAB);
+        assert_eq!(0xAB, processor.v_register[0]);
     }
 
     #[test]
@@ -699,5 +699,16 @@ mod tests {
         let result = try_concat_bytes::<u16, u8>(&test, 4).unwrap();
         
         assert_eq!(0xAB, result);
+    }
+
+    #[test]
+    fn test_shl_1() {
+        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        // load FF into v0
+        processor.consume_instruction(0x60FF).expect("");
+        processor.consume_instruction(0x800E).expect("");
+
+        assert_eq!(0xFF << 1, processor.v_register[0]);
+        assert_eq!(1, processor.v_register[0xF])
     }
 }
