@@ -3,6 +3,8 @@ use super::drawer;
 use super::Instruction;
 use super::timer::SharedTimer;
 
+use macroquad::prelude::*;
+
 const SPRITE_SIZE_BYTES: usize = 5;
 const STATIC_MEMORY: [u8 ; 80] = [
     0xF0,
@@ -157,7 +159,7 @@ impl<T: super::drawer::Drawer + Default> Default for Processor<T> {
             log: Default::default(),
             drawer: Default::default(),
             timer: SharedTimer::new(0),
-            sound_timer: SharedTimer::new(0)
+            sound_timer: SharedTimer::new(0),
         };
 
         default.flash_memory();
@@ -217,9 +219,31 @@ fn nth_digit(from: usize, n: usize) -> usize {
         return 0;
     }
 
-    println!("from: {from}, n: {n}, n_digits: {n_digits}");
-
     (from / 10_usize.pow((n_digits - n - 1) as u32)) % 10
+}
+
+pub fn match_u8_to_key(key: u8) -> KeyCode {
+    let key_code = match key {
+        0x0 => KeyCode::Key0,
+        0x1 => KeyCode::Key1,
+        0x2 => KeyCode::Key2,
+        0x3 => KeyCode::Key3,
+        0x4 => KeyCode::Key4,
+        0x5 => KeyCode::Key5,
+        0x6 => KeyCode::Key6,
+        0x7 => KeyCode::Key7,
+        0x8 => KeyCode::Key8,
+        0x9 => KeyCode::Key9,
+        0xA => KeyCode::Q,
+        0xB => KeyCode::W,
+        0xC => KeyCode::E,
+        0xD => KeyCode::R,
+        0xE => KeyCode::T,
+        0xF => KeyCode::Y,
+        _ => KeyCode::Apostrophe
+    };
+
+    return key_code
 }
 
 impl <T: super::drawer::Drawer> Processor<T> {
@@ -232,10 +256,16 @@ impl <T: super::drawer::Drawer> Processor<T> {
 
 impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
 
-    pub fn new(ram: [u8; 4096], drawer: T) -> Processor<T> {
+    pub fn draw(&mut self) {
+        self.drawer.draw();
+    }
+
+    pub fn new(ram: [u8; 4096], drawer: T, timer: SharedTimer, sound_timer: SharedTimer) -> Processor<T> {
         let mut processor = Processor {
             ram,
             drawer,
+            timer: timer,
+            sound_timer: sound_timer,
             ..Default::default()
         };
 
@@ -262,6 +292,8 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
         let hi1 = (instruction & 0x0F00) >> 8;
         let lo0 = (instruction & 0x00F0) >> 4;
         let lo1 = (instruction & 0x000F) >> 0;
+
+        // std::thread::sleep(std::time::Duration::from_secs_f32(1.0/60.0));
 
         match [hi0, hi1, lo0, lo1] {
             [0x0, 0x0, 0xE, 0x0] => {
@@ -338,18 +370,21 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             [0x8, x, y, 0x1] => {
                 //Set Vx = Vx OR Vy.
                 self.v_register[x as usize] |= self.v_register[y as usize];
+                self.v_register[0xF as usize] = 0; // quirk
                 self.pc += 2;
                 Ok(())
             },
             [0x8, x, y, 0x2] => {
                 //Set Vx = Vx AND Vy.
                 self.v_register[x as usize] &= self.v_register[y as usize];
+                self.v_register[0xF as usize] = 0; // quirk
                 self.pc += 2;
                 Ok(())
             },
             [0x8, x, y, 0x3] => {
                 //Set Vx = Vx XOR Vy.
                 self.v_register[x as usize] ^= self.v_register[y as usize];
+                self.v_register[0xF as usize] = 0; // quirk
                 self.pc += 2;
                 Ok(())
             },
@@ -387,11 +422,15 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
                 self.pc += 2;
                 Ok(())
             },
-            [0x8, x, _, 0x6] => {
+            [0x8, x, y, 0x6] => {
                 //Set Vx = Vx SHR 1.
+                
+
+                self.v_register[x as usize] = self.v_register[y as usize];
                 let vf = self.v_register[x as usize] & 0x01;
 
                 self.v_register[x as usize] >>= 1;
+                
                 self.v_register[0xF] = vf;
                 self.pc += 2;
                 Ok(())
@@ -412,11 +451,12 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             },
             [0x8, x, y, 0xE] => {
                 //Set Vx = Vx SHL 1.
-                let vf =  (self.v_register[x as usize] & 0x80 > 0) as u8;
-                
-                self.v_register[x as usize] <<= 1;
-                self.v_register[0xF] = vf;
+                self.v_register[x as usize] = self.v_register[y as usize];
+                let vf =  ((self.v_register[x as usize] & 0x80) != 0) as u8;
 
+                self.v_register[x as usize] <<= 1;
+                
+                self.v_register[0xF] = vf;
                 self.pc += 2;
                 Ok(())
             },
@@ -458,11 +498,26 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
 
                 let x_0 = self.v_register[x as usize] as usize;
                 let y_0 = self.v_register[y as usize] as usize;
+
                 for i_byte in 0_usize..(n as usize) {
                     for i_bit in 0_usize..8_usize {
                         let is_draw = (sprite[i_byte] >> i_bit) & 0x01_u8 > 0;
                         let collision = if is_draw {
-                            self.drawer.draw_pixel_at((x_0 + (7-i_bit)) % width, y_0 + i_byte % height)
+                            let x = x_0 + (7-i_bit);
+                            let y = y_0 + i_byte;
+
+                            // if we started within bounds
+                            if x_0 < self.drawer.width() && y_0 < self.drawer.height() {
+                                // then draw if we're in bounds
+                                if x < self.drawer.width() && y < self.drawer.height() {
+                                    self.drawer.draw_pixel_at(x, y)
+                                } else {
+                                    false
+                                }
+                            // otherwise the entire sprite is outside bounds
+                            } else {
+                                self.drawer.draw_pixel_at(x% width, y % height)
+                            }
                         } else {
                             false
                         };
@@ -472,22 +527,35 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
                         }
                     }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(5));
 
                 self.pc += 2;
                 Ok(())
             },
             [0xE, x, 0x9, 0xE] => {
                 //Skip next instruction if key with the value of Vx is pressed.
+                let key = self.v_register[x as usize];
+                println!("waiting for key {:x}", key);
+                
+                let key_code = match_u8_to_key(key);
 
+                if is_key_down(key_code) {
+                    self.pc += 2;
+                }
                 self.pc += 2;
-                todo!("not implemented")
+                Ok(())
             },
             [0xE, x, 0xA, 0x1] => {
                 //Skip next instruction if key with the value of Vx is not pressed.
+                let key = self.v_register[x as usize];
+                
+                let key_code = match_u8_to_key(key);
 
+                println!("waiting for not key {:x}", key);
+                if !is_key_down(key_code) {
+                    self.pc += 2;
+                }
                 self.pc += 2;
-                todo!("not implemented")
+                Ok(())
             },
             [0xF, x, 0x0, 0x7] => {
                 //Set Vx = delay timer value.
@@ -500,8 +568,66 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
             [0xF, x, 0x0, 0xA] => {
                 //Wait for a key press, store the value of the key in Vx.
 
-                //?
-                todo!("not implemented")
+
+                let kp = if is_key_down(KeyCode::Key0) {
+                    Some(0x0)
+                }
+                else if is_key_down(KeyCode::Key1) {
+                    Some(0x1)
+                }
+                else if is_key_down(KeyCode::Key2) {
+                    Some(0x2)
+                }
+                else if is_key_down(KeyCode::Key3) {
+                    Some(0x3)
+                }
+                else if is_key_down(KeyCode::Key4) {
+                    Some(0x4)
+                }
+                else if is_key_down(KeyCode::Key5) {
+                    Some(0x5)
+                }
+                else if is_key_down(KeyCode::Key6) {
+                    Some(0x6)
+                }
+                else if is_key_down(KeyCode::Key7) {
+                    Some(0x7)
+                }
+                else if is_key_down(KeyCode::Key8) {
+                    Some(0x8)
+                }
+                else if is_key_down(KeyCode::Key9) {
+                    Some(0x9)
+                }
+                else if is_key_down(KeyCode::Q) {
+                    Some(0xA)
+                }
+                else if is_key_down(KeyCode::W) {
+                    Some(0xB)
+                }
+                else if is_key_down(KeyCode::E) {
+                    Some(0xC)
+                }
+                else if is_key_down(KeyCode::R) {
+                    Some(0xD)
+                }
+                else if is_key_down(KeyCode::T) {
+                    Some(0xE)
+                }
+                else if is_key_down(KeyCode::Y){
+                    Some(0xF)
+                } else {
+                    None
+                };
+
+                if kp.is_none() {
+                    return Ok(())
+                }
+
+
+                self.v_register[x as usize] = kp.unwrap();
+                self.pc += 2;
+                Ok(())
             },
             [0xF, x, 0x1, 0x5] => {
                 //Set delay timer = Vx.
@@ -549,6 +675,8 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
                     self.ram[(self.i_register + i as u16) as usize] = self.v_register[i as usize];
                 }
 
+                self.i_register += 1; // quirk
+
                 self.pc += 2;
                 Ok(())
             },
@@ -557,6 +685,8 @@ impl<T: super::drawer::Drawer + Default + std::fmt::Debug> Processor<T> {
                 for i in 0..=x {
                     self.v_register[i as usize] = self.ram[(self.i_register + i as u16) as usize];
                 }
+
+                self.i_register += 1; // quirk
 
                 self.pc += 2;
                 Ok(())
@@ -584,7 +714,7 @@ mod tests {
 
     #[test]
     fn test_return_abc() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
 
         processor.consume_instruction(0x2ABC).expect(""); // call function at ABC
         processor.consume_instruction(0x00EE).expect(""); // return to 0x0000 
@@ -596,7 +726,7 @@ mod tests {
     #[test]
     fn test_jump_abc() {
 
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
         processor.consume_instruction(0x1ABC).expect("");
 
         assert_eq!(0x0ABC, processor.pc);
@@ -604,7 +734,7 @@ mod tests {
 
     #[test]
     fn test_call_abc() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
 
         processor.consume_instruction(0x1ABC).expect(""); //put pc at 0xABC
         processor.consume_instruction(0x2DEF).expect(""); 
@@ -616,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_skip_if_next_instruction_eq() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
 
         let pre_pc = processor.pc;
         processor.v_register[0x0] = 0xAB;
@@ -627,7 +757,7 @@ mod tests {
     }
     #[test]
     fn test_skip_if_next_instruction_neq() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
 
         let pre_pc = processor.pc;
         processor.v_register[0x0] = 0xCD;
@@ -638,7 +768,7 @@ mod tests {
 
     #[test]
     fn test_skip_if_not_next_instruction_eq() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
 
         let pre_pc = processor.pc;
         processor.v_register[0x0] = 0xCD;
@@ -650,7 +780,7 @@ mod tests {
 
     #[test]
     fn test_skip_if_not_next_instruction_neq() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
 
         let pre_pc = processor.pc;
         processor.v_register[0x0] = 0xAB;
@@ -661,7 +791,7 @@ mod tests {
 
     #[test]
     fn test_skip_if_next_instruction_eq_reg() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
 
         let pre_pc = processor.pc;
         processor.v_register[0x0] = 0xAB;
@@ -673,7 +803,7 @@ mod tests {
 
     #[test]
     fn test_skip_if_next_instruction_neq_reg() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
 
         let pre_pc = processor.pc;
         processor.v_register[0x0] = 0xAB;
@@ -685,7 +815,7 @@ mod tests {
 
     #[test]
     fn test_load_byte_into_register() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
 
         processor.consume_instruction(0x60AB).expect("");
         
@@ -703,7 +833,7 @@ mod tests {
 
     #[test]
     fn test_shl_1() {
-        let mut processor = Processor::<drawer::GenericDrawer>::default();
+        let mut processor = Processor::<drawer::generic::GenericDrawer>::default();
         // load FF into v0
         processor.consume_instruction(0x60FF).expect("");
         processor.consume_instruction(0x800E).expect("");
